@@ -1,10 +1,11 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Icon from '@/components/ui/icon';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { useToast } from '@/hooks/use-toast';
 
 type TabType = 'chats' | 'contacts' | 'calls' | 'settings' | 'profile';
 
@@ -42,19 +43,40 @@ interface Message {
   time: string;
   isMine: boolean;
   type: 'text' | 'image' | 'video' | 'audio';
+  fileUrl?: string;
+  fileName?: string;
 }
 
 export default function Index() {
   const [activeTab, setActiveTab] = useState<TabType>('chats');
   const [selectedChat, setSelectedChat] = useState<number | null>(null);
   const [messageInput, setMessageInput] = useState('');
-
-  const chats: Chat[] = [
+  const [chats, setChats] = useState<Chat[]>([
     { id: 1, name: 'Анна Иванова', lastMessage: 'Привет! Как дела?', time: '14:23', unread: 2, avatar: '👩', online: true },
     { id: 2, name: 'Команда проекта', lastMessage: 'Отправил файлы по проекту', time: '13:45', unread: 0, avatar: '👥', online: false },
     { id: 3, name: 'Максим', lastMessage: 'Созвонимся сегодня?', time: '12:10', unread: 5, avatar: '👨', online: true },
     { id: 4, name: 'Мама', lastMessage: 'Не забудь зайти в магазин', time: 'Вчера', unread: 0, avatar: '👩‍🦰', online: false },
-  ];
+  ]);
+  const [chatMessages, setChatMessages] = useState<{ [chatId: number]: Message[] }>({
+    1: [
+      { id: 1, text: 'Привет! Как дела?', time: '14:20', isMine: false, type: 'text' },
+      { id: 2, text: 'Отлично! Работаю над новым проектом', time: '14:21', isMine: true, type: 'text' },
+      { id: 3, text: 'Звучит интересно! Расскажешь?', time: '14:22', isMine: false, type: 'text' },
+      { id: 4, text: 'Конечно! Это мессенджер с современным дизайном', time: '14:23', isMine: true, type: 'text' },
+    ],
+    2: [],
+    3: [],
+    4: [],
+  });
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const audioInputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const { toast } = useToast();
 
   const contacts: Contact[] = [
     { id: 1, name: 'Анна Иванова', status: 'В сети', avatar: '👩', online: true },
@@ -70,18 +92,120 @@ export default function Index() {
     { id: 3, name: 'Команда проекта', type: 'video', time: 'Вчера, 18:30', duration: '45:00', incoming: true, avatar: '👥' },
   ];
 
-  const messages: Message[] = [
-    { id: 1, text: 'Привет! Как дела?', time: '14:20', isMine: false, type: 'text' },
-    { id: 2, text: 'Отлично! Работаю над новым проектом', time: '14:21', isMine: true, type: 'text' },
-    { id: 3, text: 'Звучит интересно! Расскажешь?', time: '14:22', isMine: false, type: 'text' },
-    { id: 4, text: 'Конечно! Это мессенджер с современным дизайном', time: '14:23', isMine: true, type: 'text' },
-  ];
+  const getCurrentTime = () => {
+    const now = new Date();
+    return `${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}`;
+  };
 
-  const handleSendMessage = () => {
-    if (messageInput.trim()) {
-      setMessageInput('');
+  const handleSendMessage = (text?: string, type: 'text' | 'image' | 'video' | 'audio' = 'text', fileUrl?: string, fileName?: string) => {
+    if (!selectedChat) return;
+    
+    const messageText = text || messageInput.trim();
+    if (!messageText && type === 'text') return;
+
+    const newMessage: Message = {
+      id: Date.now(),
+      text: messageText,
+      time: getCurrentTime(),
+      isMine: true,
+      type,
+      fileUrl,
+      fileName,
+    };
+
+    setChatMessages(prev => ({
+      ...prev,
+      [selectedChat]: [...(prev[selectedChat] || []), newMessage],
+    }));
+
+    setChats(prevChats => 
+      prevChats.map(chat => 
+        chat.id === selectedChat 
+          ? { ...chat, lastMessage: messageText || `${type === 'image' ? '📷' : type === 'video' ? '🎥' : '🎵'} ${fileName || 'Файл'}`, time: getCurrentTime() }
+          : chat
+      )
+    );
+
+    setMessageInput('');
+    
+    toast({
+      title: 'Сообщение отправлено',
+      duration: 2000,
+    });
+  };
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>, type: 'image' | 'video' | 'audio') => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const fileUrl = URL.createObjectURL(file);
+    const emoji = type === 'image' ? '📷 Фото' : type === 'video' ? '🎥 Видео' : '🎵 Аудио';
+    
+    handleSendMessage(emoji, type, fileUrl, file.name);
+    
+    toast({
+      title: `${emoji} загружено`,
+      description: file.name,
+      duration: 3000,
+    });
+  };
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+
+      const chunks: Blob[] = [];
+      mediaRecorder.ondataavailable = (e) => chunks.push(e.data);
+      
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const audioUrl = URL.createObjectURL(blob);
+        handleSendMessage('🎤 Голосовое сообщение', 'audio', audioUrl, 'voice.webm');
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsRecording(true);
+      setRecordingTime(0);
+      
+      recordingIntervalRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1);
+      }, 1000);
+
+      toast({
+        title: '🎤 Запись началась',
+        duration: 2000,
+      });
+    } catch (error) {
+      toast({
+        title: 'Ошибка доступа к микрофону',
+        variant: 'destructive',
+        duration: 3000,
+      });
     }
   };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+      if (recordingIntervalRef.current) {
+        clearInterval(recordingIntervalRef.current);
+      }
+    }
+  };
+
+  const filteredChats = chats.filter(chat =>
+    chat.name.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  const filteredMessages = selectedChat 
+    ? (chatMessages[selectedChat] || []).filter(msg =>
+        msg.text.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : [];
 
   const renderChats = () => (
     <div className="flex-1 flex flex-col">
@@ -89,10 +213,12 @@ export default function Index() {
         <Input 
           placeholder="🔍 Поиск чатов..." 
           className="w-full bg-muted/50 border-none"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
         />
       </div>
       <ScrollArea className="flex-1">
-        {chats.map((chat) => (
+        {filteredChats.map((chat) => (
           <div
             key={chat.id}
             onClick={() => setSelectedChat(chat.id)}
@@ -304,9 +430,23 @@ export default function Index() {
           </div>
         </div>
 
+        <div className="flex items-center gap-2 p-2 border-b">
+          <Input 
+            placeholder="🔍 Поиск в чате..."
+            className="flex-1 bg-muted/50 border-none h-9"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          {searchQuery && (
+            <Button size="sm" variant="ghost" onClick={() => setSearchQuery('')}>
+              <Icon name="X" size={16} />
+            </Button>
+          )}
+        </div>
+
         <ScrollArea className="flex-1 p-4 bg-muted/20">
           <div className="space-y-4 max-w-4xl mx-auto">
-            {messages.map((msg) => (
+            {(searchQuery ? filteredMessages : (chatMessages[selectedChat] || [])).map((msg) => (
               <div
                 key={msg.id}
                 className={`flex ${msg.isMine ? 'justify-end' : 'justify-start'} animate-scale-in`}
@@ -318,6 +458,15 @@ export default function Index() {
                       : 'bg-card'
                   }`}
                 >
+                  {msg.type === 'image' && msg.fileUrl && (
+                    <img src={msg.fileUrl} alt="Изображение" className="rounded-lg mb-2 max-w-full" />
+                  )}
+                  {msg.type === 'video' && msg.fileUrl && (
+                    <video src={msg.fileUrl} controls className="rounded-lg mb-2 max-w-full" />
+                  )}
+                  {msg.type === 'audio' && msg.fileUrl && (
+                    <audio src={msg.fileUrl} controls className="mb-2 max-w-full" />
+                  )}
                   <p className="text-sm">{msg.text}</p>
                   <span className={`text-xs ${msg.isMine ? 'text-white/70' : 'text-muted-foreground'}`}>
                     {msg.time}
@@ -329,14 +478,49 @@ export default function Index() {
         </ScrollArea>
 
         <div className="p-4 border-t bg-card">
+          {isRecording && (
+            <div className="flex items-center justify-center gap-3 mb-3 p-3 bg-red-500/10 rounded-xl">
+              <div className="w-3 h-3 bg-red-500 rounded-full animate-pulse" />
+              <span className="text-sm font-medium">Запись: {recordingTime}с</span>
+              <Button size="sm" variant="destructive" onClick={stopRecording}>
+                Остановить
+              </Button>
+            </div>
+          )}
           <div className="flex items-center gap-2">
-            <Button size="icon" variant="ghost">
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              accept="*/*"
+              onChange={(e) => handleFileUpload(e, 'video')}
+            />
+            <input
+              ref={imageInputRef}
+              type="file"
+              className="hidden"
+              accept="image/*"
+              onChange={(e) => handleFileUpload(e, 'image')}
+            />
+            <input
+              ref={audioInputRef}
+              type="file"
+              className="hidden"
+              accept="audio/*"
+              onChange={(e) => handleFileUpload(e, 'audio')}
+            />
+            <Button size="icon" variant="ghost" onClick={() => fileInputRef.current?.click()}>
               <Icon name="Paperclip" size={20} />
             </Button>
-            <Button size="icon" variant="ghost">
+            <Button size="icon" variant="ghost" onClick={() => imageInputRef.current?.click()}>
               <Icon name="Image" size={20} />
             </Button>
-            <Button size="icon" variant="ghost">
+            <Button 
+              size="icon" 
+              variant="ghost" 
+              onClick={isRecording ? stopRecording : startRecording}
+              className={isRecording ? 'text-red-500' : ''}
+            >
               <Icon name="Mic" size={20} />
             </Button>
             <Input
@@ -346,7 +530,7 @@ export default function Index() {
               onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
               className="flex-1"
             />
-            <Button onClick={handleSendMessage} className="rounded-full" size="icon">
+            <Button onClick={() => handleSendMessage()} className="rounded-full" size="icon">
               <Icon name="Send" size={20} />
             </Button>
           </div>
